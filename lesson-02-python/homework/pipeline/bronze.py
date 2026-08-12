@@ -15,7 +15,6 @@ TODO (Завдання 1): реалізуйте build_bronze().
 from __future__ import annotations
 
 import polars as pl
-import os 
 
 from . import config
 
@@ -33,11 +32,15 @@ def build_bronze() -> pl.DataFrame:
             pl.col("created_at").str.to_datetime("%Y-%m-%dT%H:%M:%SZ", time_zone="UTC"),
             pl.col("public"),
             pl.col("payload").struct.field("action").alias("action"),
-            pl.col("payload").struct.field("commits").list.len().fill_null(0).cast(pl.Int64).alias("commit_count"),
+            pl.col("payload")
+            .struct.field("commits")
+            .list.len()
+            .fill_null(0)
+            .cast(pl.Int64)
+            .alias("commit_count"),
         )
         .collect()
     )
 
-    os.makedirs(os.path.dirname(config.BRONZE_FILE), exist_ok=True)
-    df.write_parquet(config.BRONZE_FILE)
+    df.write_parquet(config.BRONZE_FILE, mkdir=True)
     return df
