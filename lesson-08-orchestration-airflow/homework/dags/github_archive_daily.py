@@ -91,4 +91,3 @@ with DAG(
     )
 
     check_availability >> download_archive >> validate_file >> load_task >> notify_completion
-    
