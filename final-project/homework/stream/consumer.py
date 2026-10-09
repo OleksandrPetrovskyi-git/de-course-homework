@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 import signal
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from types import FrameType
 
@@ -55,10 +55,33 @@ def landing_path(
 ) -> Path:
     """Шлях файлу для батчу. Детермінований: той самий діапазон офсетів -> те саме імʼя.
 
-    TODO (1): `base/dt=YYYY-MM-DD/hour=HH/part-p{partition}-o{first:012d}-o{last:012d}.ndjson`,
+    `base/dt=YYYY-MM-DD/hour=HH/part-p{partition}-o{first:012d}-o{last:012d}.ndjson`,
     де dt і hour — UTC-час запису (`ingested_at`). Формат — у SPEC.md, розділ 2.2.
     """
-    raise NotImplementedError("TODO (1): landing_path")
+    when = ingested_at.astimezone(UTC)
+    name = f"part-p{partition}-o{first_offset:012d}-o{last_offset:012d}.ndjson"
+    return base / f"dt={when:%Y-%m-%d}" / f"hour={when:%H}" / name
+
+
+def _write_atomic(path: Path, body: bytes) -> None:
+    """Записує файл так, що читач бачить або повний файл, або нічого."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with tmp.open("wb") as f:
+            f.write(body)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    # fsync каталогу: перейменування теж має пережити падіння машини.
+    dir_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def write_batch(
@@ -68,12 +91,26 @@ def write_batch(
 ) -> list[Path]:
     """Записує батч (partition, offset, value) у landing. Повертає створені файли.
 
-    TODO (2): один файл на партицію, записи відсортовано за офсетом, один JSON-обʼєкт на рядок
+    Один файл на партицію, записи відсортовано за офсетом, один JSON-обʼєкт на рядок
     (рівно один `\\n` у кінці), атомарний запис (`*.ndjson.tmp` -> fsync -> `os.replace`), збій
     не лишає ні готового файлу, ні `.tmp`. Повторний виклик із тим самим батчем нічого не
     дублює. Вимоги — у SPEC.md, розділ 2.2.
     """
-    raise NotImplementedError("TODO (2): write_batch")
+    by_partition: dict[int, list[tuple[int, bytes]]] = {}
+    for partition, offset, value in records:
+        by_partition.setdefault(partition, []).append((offset, value))
+
+    # Спершу готуємо вміст усіх файлів: некоректний запис падає до того, як на диску щось зʼявилось.
+    prepared: list[tuple[Path, bytes]] = []
+    for partition in sorted(by_partition):
+        items = sorted(by_partition[partition], key=lambda item: item[0])
+        body = b"".join(value.rstrip(b"\n") + b"\n" for _, value in items)
+        path = landing_path(base, ingested_at, partition, items[0][0], items[-1][0])
+        prepared.append((path, body))
+
+    for path, body in prepared:
+        _write_atomic(path, body)
+    return [path for path, _ in prepared]
 
 
 def main() -> None:
@@ -106,11 +143,10 @@ def main() -> None:
         if not batch:
             batch_started = time.monotonic()
             return
-        # TODO (3): записати батч у landing (write_batch), і ЛИШЕ ПОТІМ закомітити офсети
-        # (`consumer.commit(asynchronous=False)`). Порядок «запис -> commit» — це те, що не дає
-        # втрачати повідомлення: падіння між ними дасть дублікати, але не втрати.
-        raise NotImplementedError("TODO (3): flush()")
-        files: list[Path] = []
+        # Порядок «запис -> commit» не дає втрачати повідомлення: падіння між ними дасть
+        # дублікати (батч перечитається), але не втрати.
+        files = write_batch(config.LANDING_DIR, datetime.now(UTC), batch)
+        consumer.commit(asynchronous=False)
         total += len(batch)
         print(f"  {len(batch)} подій -> {', '.join(p.name for p in files)} (всього {total})")
         batch = []
